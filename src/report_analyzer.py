@@ -6,6 +6,7 @@ import pytesseract
 from src.chatbot_service import model
 from src.rag import store_report_analysis
 from src.logger import setup_logger
+from src.chatbot_service import chatbot
 
 logger = setup_logger("report_analyzer")
 

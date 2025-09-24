@@ -1,9 +1,13 @@
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from src.chatbot_service import get_disease_info, simplify_terms
+from pydantic import BaseModel
+from src.chatbot_service import get_disease_info, simplify_terms, chatbot
 from src.report_analyzer import analyze_report
 from src.logger import setup_logger
-from src.rag import get_relevant_contexts, embed_text
+from src.rag import get_relevant_contexts
+
+class QuestionRequest(BaseModel):
+    question: str
 
 logger = setup_logger("main")
 
@@ -36,17 +40,12 @@ async def upload_report(file: UploadFile = File(...)):
         return {"error": str(e)}
 
 @app.post("/ask-question/")
-async def ask_question(question: str = Form(...)):
+async def ask_question(question: QuestionRequest):
     try:
-        answer = get_disease_info(question)
-        retrieved_docs = get_relevant_contexts(question)
-        return {
-            "question": question,
-            "llm_answer": answer,
-            "retrieved_docs": retrieved_docs
-        }
+        response = chatbot.generate_response(question.question)
+        return {"response": response}
     except Exception as e:
-        logger.error(f"Error in ask_question: {str(e)}")
+        logger.error(f"Error in ask_question: {e}")
         return {"error": str(e)}
 
 @app.post("/simplify-term/")
