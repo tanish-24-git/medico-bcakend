@@ -1,54 +1,15 @@
-import json
-from pathlib import Path
-import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from PyPDF2 import PdfReader
+import re
+import io
 import pdfplumber
 from PIL import Image
 import pytesseract
-import io
-import re
+from src.chatbot_service import model
+from src.rag import store_report_analysis
+from src.logger import setup_logger
 
-from .config import GEMINI_API_KEY, FAISS_INDEX_PATH, METADATA_PATH
+logger = setup_logger("report_analyzer")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
-
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Load FAISS index and metadata
-index = faiss.read_index(FAISS_INDEX_PATH)
-with open(METADATA_PATH, 'r') as f:
-    metadata = json.load(f)
-
-def get_relevant_contexts(query, k=3):
-    emb = embedder.encode(query)
-    D, I = index.search(np.array([emb]).astype(np.float32), k=k)
-    contexts = [metadata[i]['full_text'] for i in I[0] if i >= 0]
-    return contexts
-
-def get_disease_info(question):
-    try:
-        contexts = get_relevant_contexts(question)
-        prompt = f"Question: {question}\nRelevant info: {contexts}\nAnswer based on info:"
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def simplify_terms(term):
-    try:
-        prompt = f"Simplify the medical term '{term}' in simple language:"
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def clean_response(response_text):
-    """Post-process the response to ensure consistent formatting and capitalization."""
-    # Fix specific acronyms to uppercase (e.g., Cbc -> CBC, Wbc -> WBC)
+def clean_response(response_text: str) -> str:
     acronyms = {
         r'\bCbc\b': 'CBC',
         r'\bWbc\b': 'WBC',
@@ -61,40 +22,34 @@ def clean_response(response_text):
     for pattern, replacement in acronyms.items():
         response_text = re.sub(pattern, replacement, response_text, flags=re.IGNORECASE)
     
-    # Capitalize test names (e.g., Hemoglobin, Leukocyte)
     response_text = re.sub(r'\b([A-Za-z]+)\b(?=:\s+\d|\(Missing\))', lambda m: m.group(1).title(), response_text)
-    # Ensure double line breaks between sections
     response_text = re.sub(r'(\n#+\s)', r'\n\n\1', response_text)
     response_text = re.sub(r'(\n\*\*.*\*\*)', r'\n\n\1', response_text)
-    # Fix bullet spacing
     response_text = re.sub(r'-\s*([^\s])', r'- \1', response_text)
-    # Remove extra spaces or newlines
     response_text = re.sub(r'\n{3,}', r'\n\n', response_text)
     return response_text.strip()
 
-def analyze_report(file_location):
+def analyze_report(file_content: bytes) -> str:
     try:
         text = ''
-        
-        # Use pdfplumber for better text extraction
-        with pdfplumber.open(file_location) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + '\n'
-                else:
-                    print(f"Warning: No text extracted from page {page.page_number}. Attempting OCR...")
-                    img = page.to_image(resolution=300)
-                    img_byte_arr = io.BytesIO()
-                    img.original.save(img_byte_arr, format='PNG')
-                    img_byte_arr.seek(0)
-                    ocr_text = pytesseract.image_to_string(Image.open(img_byte_arr))
-                    text += ocr_text + '\n'
+        with io.BytesIO(file_content) as file_io:
+            with pdfplumber.open(file_io) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + '\n'
+                    else:
+                        logger.warning(f"No text extracted from page {page.page_number}. Attempting OCR...")
+                        img = page.to_image(resolution=300)
+                        img_byte_arr = io.BytesIO()
+                        img.original.save(img_byte_arr, format='PNG')
+                        img_byte_arr.seek(0)
+                        ocr_text = pytesseract.image_to_string(Image.open(img_byte_arr))
+                        text += ocr_text + '\n'
 
         if not text.strip():
             return "Error: No text could be extracted from the PDF. It may be fully image-based or corrupted."
 
-        # Strict prompt for structured, readable Markdown output
         prompt = f"""
 Analyze this medical report and output in this exact structured Markdown format. Follow these rules strictly:
 - Use bold headings (**Heading**) and subheadings (### Heading).
@@ -151,6 +106,8 @@ Report text: {text[:2000]}
 """
         response = model.generate_content(prompt)
         cleaned_response = clean_response(response.text)
+        store_report_analysis(text, cleaned_response)
         return cleaned_response
     except Exception as e:
+        logger.error(f"Error analyzing report: {str(e)}")
         return f"Error analyzing report: {str(e)}. Extracted text: '{text[:500]}...'"
