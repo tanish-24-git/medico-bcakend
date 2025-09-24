@@ -1,114 +1,226 @@
-import re
-import io
 import pdfplumber
-from PIL import Image
 import pytesseract
-from src.chatbot_service import model
-from src.rag import store_report_analysis
+from PIL import Image
+import io
+import json
+from datetime import datetime
 from src.logger import setup_logger
 from src.chatbot_service import chatbot
+from src.rag import embed_text, upsert_to_pinecone
 
 logger = setup_logger("report_analyzer")
 
-def clean_response(response_text: str) -> str:
-    acronyms = {
-        r'\bCbc\b': 'CBC',
-        r'\bWbc\b': 'WBC',
-        r'\bHct\b': 'HCT',
-        r'\bMcv\b': 'MCV',
-        r'\bMch\b': 'MCH',
-        r'\bMchc\b': 'MCHC',
-        r'\bRbc\b': 'RBC'
-    }
-    for pattern, replacement in acronyms.items():
-        response_text = re.sub(pattern, replacement, response_text, flags=re.IGNORECASE)
-    
-    response_text = re.sub(r'\b([A-Za-z]+)\b(?=:\s+\d|\(Missing\))', lambda m: m.group(1).title(), response_text)
-    response_text = re.sub(r'(\n#+\s)', r'\n\n\1', response_text)
-    response_text = re.sub(r'(\n\*\*.*\*\*)', r'\n\n\1', response_text)
-    response_text = re.sub(r'-\s*([^\s])', r'- \1', response_text)
-    response_text = re.sub(r'\n{3,}', r'\n\n', response_text)
-    return response_text.strip()
-
-def analyze_report(file_content: bytes) -> str:
+def analyze_report(file_content):
     try:
-        text = ''
-        with io.BytesIO(file_content) as file_io:
-            with pdfplumber.open(file_io) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + '\n'
-                    else:
-                        logger.warning(f"No text extracted from page {page.page_number}. Attempting OCR...")
-                        img = page.to_image(resolution=300)
-                        img_byte_arr = io.BytesIO()
-                        img.original.save(img_byte_arr, format='PNG')
-                        img_byte_arr.seek(0)
-                        ocr_text = pytesseract.image_to_string(Image.open(img_byte_arr))
-                        text += ocr_text + '\n'
-
+        # Extract text from the report
+        text = extract_text_from_file(file_content)
+        logger.info(f"Extracted text length: {len(text)} characters")
+        
         if not text.strip():
-            return "Error: No text could be extracted from the PDF. It may be fully image-based or corrupted."
-
-        prompt = f"""
-Analyze this medical report and output in this exact structured Markdown format. Follow these rules strictly:
-- Use bold headings (**Heading**) and subheadings (### Heading).
-- Use bullets (-) with a space after each bullet.
-- Capitalize acronyms correctly (e.g., CBC, WBC, HCT, MCV, MCH, MCHC, RBC).
-- Capitalize test names consistently (e.g., Hemoglobin, Total Leukocyte Count).
-- Add a blank line between sections for readability.
-- Do not add extra text or deviate from this structure.
-- If data is missing, explicitly state '(Missing)' for the value.
-- Use 'None' for empty treatments or precautions if none are mentioned.
-- Ensure all sections are included, even if empty.
-- Use 'their' instead of 'his' for gender-neutral language in the closing statement.
-
-### Medical Report Analysis: Complete Blood Count (CBC)
-
-**Report Overview**  
-[Brief summary of the report, its purpose, and limitations like missing data or need for physician consultation.]
-
-#### **Patient Information**
-- **Name**: [Name]  
-- **Age**: [Age]  
-- **Sex**: [Sex, e.g., Male, Female, M, F]  
-- **Date of Report**: [Date, format as DD/MM/YYYY]  
-
-#### **Test Results**
-[Note about units/reference ranges if applicable, e.g., 'Units and reference ranges are not provided.']  
-
-- **Hemoglobin**: [Value or (Missing)]  
-- **Total Leukocyte Count (WBC)**: [Value or (Missing)]  
-- **Differential Leukocyte Count**: [Value or (Missing)]  
-- **Platelet Count**: [Value or (Missing)]  
-- **Total RBC Count**: [Value or (Missing)]  
-- **Hematocrit (HCT)**: [Value or (Missing)]  
-- **Mean Corpuscular Volume (MCV)**: [Value or (Missing)]  
-- **Mean Cell Hemoglobin (MCH)**: [Value or (Missing)]  
-- **Mean Cell Hemoglobin Concentration (MCHC)**: [Value or (Missing)]  
-
-#### **Clinical Notes from Report**
-- [Note 1 or None if no notes]  
-- [Note 2 or None if no notes]  
-
-#### **Potential Diseases/Conditions**
-[Speculative conditions based on data; emphasize no diagnosis and need for doctor.]
-
-#### **Treatments Suggested**
-[None or list treatments if mentioned.]
-
-#### **Precautions and Recommendations**
-[Precautions from report; include general advice to consult a doctor.]
-
-This analysis is for informational purposes only and is not a substitute for professional medical advice. [Patient Name] should follow up with their healthcare provider promptly.
-
-Report text: {text[:2000]}
-"""
-        response = model.generate_content(prompt)
-        cleaned_response = clean_response(response.text)
-        store_report_analysis(text, cleaned_response)
-        return cleaned_response
+            return "Unable to extract readable text from the report. Please ensure the file is a clear PDF or image."
+        
+        # Comprehensive medical report analysis
+        analysis = perform_comprehensive_analysis(text)
+        
+        # Store the analysis in Pinecone for future reference
+        store_report_in_pinecone(text, analysis)
+        
+        return analysis
+        
     except Exception as e:
-        logger.error(f"Error analyzing report: {str(e)}")
-        return f"Error analyzing report: {str(e)}. Extracted text: '{text[:500]}...'"
+        logger.error(f"Error analyzing report: {e}")
+        return f"Error analyzing report: {e}. Please consult a healthcare professional."
+
+def perform_comprehensive_analysis(text):
+    """Perform detailed medical report analysis using advanced prompts"""
+    
+    comprehensive_prompt = f"""
+    You are a senior medical doctor and pathologist with 20+ years of experience. Analyze this medical report with extreme attention to detail. Provide a comprehensive analysis that covers everything a patient would want to know.
+
+    MEDICAL REPORT TEXT:
+    {text}
+
+    Please provide a DETAILED analysis in the following structured format:
+
+    ## 📋 REPORT OVERVIEW
+    - Patient Details: [Extract name, age, gender, date]
+    - Report Type: [Blood test, Urine analysis, Imaging, etc.]
+    - Laboratory/Hospital: [Where test was conducted]
+    - Report Date: [When conducted]
+    - Referring Doctor: [If mentioned]
+
+    ## 🔬 DETAILED TEST RESULTS ANALYSIS
+    For each test parameter, provide:
+    - Test Name & Purpose: [What does this test measure and why is it important]
+    - Your Result: [Actual value found]
+    - Normal Range: [Reference values]
+    - Status: [Normal/Abnormal/Borderline]
+    - Clinical Significance: [What this means for your health]
+
+    ## 🚨 CRITICAL FINDINGS & RED FLAGS
+    - Immediate Concerns: [Any urgent abnormalities]
+    - Values Outside Normal Range: [All abnormal results explained]
+    - Trends: [Compare with previous results if dates suggest follow-up]
+
+    ## 🎯 POSSIBLE CONDITIONS & IMPLICATIONS
+    ### Short-term Health Implications:
+    - What these results suggest about current health status
+    - Any immediate symptoms or conditions indicated
+
+    ### Long-term Health Implications:
+    - Risk factors identified
+    - Potential future health concerns
+    - Preventive measures needed
+
+    ## 💊 DOCTOR'S RECOMMENDATIONS & NEXT STEPS
+    ### Immediate Actions Required:
+    - Urgent medical attention needed (Yes/No and why)
+    - Medications that might be prescribed
+    - Lifestyle changes recommended
+
+    ### Follow-up Care:
+    - Additional tests that may be ordered
+    - Specialist referrals likely needed
+    - Monitoring schedule recommendations
+
+    ## 🏠 HOME CARE & LIFESTYLE MODIFICATIONS
+    ### Dietary Recommendations:
+    - Foods to include/avoid based on results
+    - Nutritional supplements that might help
+
+    ### Exercise & Activity:
+    - Safe activity levels
+    - Exercises that could help improve results
+
+    ### Daily Life Management:
+    - Practical tips for managing identified conditions
+    - Warning signs to watch for
+
+    ## 📚 DETAILED MEDICAL EXPLANATIONS
+    ### Technical Terms Simplified:
+    [Explain all medical jargon in simple terms]
+
+    ### Why These Tests Were Ordered:
+    [Explain the medical reasoning behind each test]
+
+    ### How Results Interconnect:
+    [Explain how different test results relate to each other]
+
+    ## 🔍 WHAT PATIENTS TYPICALLY GOOGLE
+    ### Common Concerns About These Results:
+    - "What does elevated [parameter] mean?"
+    - "Should I be worried about [abnormal value]?"
+    - "What causes [specific finding]?"
+
+    ### Evidence-Based Answers:
+    [Provide scientific, reassuring, but honest explanations]
+
+    ## ⚖️ RISK ASSESSMENT
+    ### Overall Health Risk Level: [Low/Moderate/High]
+    ### Specific Risk Factors Identified:
+    ### Protective Factors Present:
+
+    ## 🎯 PERSONALIZED HEALTH PLAN
+    ### 30-Day Action Plan:
+    ### 90-Day Goals:
+    ### Annual Monitoring Schedule:
+
+    ## ⚠️ IMPORTANT DISCLAIMERS
+    - This analysis is for educational purposes
+    - Always consult your healthcare provider
+    - Don't make treatment decisions based solely on this analysis
+    - Seek immediate medical attention if you have concerning symptoms
+
+    REMEMBER: Be thorough, compassionate, and provide hope where appropriate while being honest about concerns. Think like a caring doctor explaining to their own family member.
+    """
+    
+    try:
+        response = chatbot.model.generate_content(comprehensive_prompt)
+        logger.info("Successfully generated comprehensive report analysis")
+        return response.text
+    except Exception as e:
+        logger.error(f"Error generating comprehensive analysis: {e}")
+        return f"Error analyzing report: {e}"
+
+def store_report_in_pinecone(report_text, analysis):
+    """Store the report and analysis in Pinecone for future retrieval"""
+    try:
+        # Create embeddings for both report and analysis
+        report_embedding = embed_text(report_text)
+        analysis_embedding = embed_text(analysis)
+        
+        # Generate unique IDs
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_id = f"report_{timestamp}_{hash(report_text) % 10000}"
+        analysis_id = f"analysis_{timestamp}_{hash(analysis) % 10000}"
+        
+        # Prepare metadata
+        report_metadata = {
+            'type': 'medical_report',
+            'content': 'original_report',
+            'full_text': report_text,
+            'timestamp': timestamp,
+            'source': 'uploaded_document'
+        }
+        
+        analysis_metadata = {
+            'type': 'medical_analysis',
+            'content': 'ai_analysis',
+            'full_text': analysis,
+            'timestamp': timestamp,
+            'source': 'ai_generated'
+        }
+        
+        # Store in Pinecone
+        vectors = [report_embedding, analysis_embedding]
+        ids = [report_id, analysis_id]
+        metadata_list = [report_metadata, analysis_metadata]
+        
+        upsert_to_pinecone(vectors, ids, metadata_list)
+        logger.info(f"Successfully stored report and analysis in Pinecone with IDs: {report_id}, {analysis_id}")
+        
+    except Exception as e:
+        logger.error(f"Error storing report in Pinecone: {e}")
+
+def extract_text_from_file(file_content):
+    """Extract text from PDF or image file with enhanced error handling"""
+    try:
+        text = ""
+        
+        # Try PDF extraction first
+        try:
+            with io.BytesIO(file_content) as pdf_file:
+                with pdfplumber.open(pdf_file) as pdf:
+                    for page_num, page in enumerate(pdf.pages):
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += f"\n--- Page {page_num + 1} ---\n"
+                            text += page_text + "\n"
+                            
+            if text.strip():
+                logger.info(f"Successfully extracted text from PDF: {len(text)} characters")
+                return text.strip()
+                
+        except Exception as pdf_error:
+            logger.warning(f"PDF extraction failed: {pdf_error}")
+        
+        # If PDF extraction failed, try OCR
+        try:
+            image = Image.open(io.BytesIO(file_content))
+            
+            # Enhance image for better OCR
+            image = image.convert('RGB')
+            
+            # Extract text using OCR
+            text = pytesseract.image_to_string(image, config='--psm 6')
+            logger.info(f"Successfully extracted text using OCR: {len(text)} characters")
+            return text.strip()
+            
+        except Exception as ocr_error:
+            logger.error(f"OCR extraction failed: {ocr_error}")
+        
+        return ""
+        
+    except Exception as e:
+        logger.error(f"Error extracting text: {e}")
+        return ""
