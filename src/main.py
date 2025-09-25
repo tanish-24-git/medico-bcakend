@@ -1,13 +1,39 @@
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+# FastAPI application: Main entry point
+# Updated: Added endpoints for video calls, prescriptions, recording uploads; WebSocket for signaling
+
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from src.chatbot_service import get_disease_info, simplify_terms, chatbot
 from src.report_analyzer import analyze_report
 from src.logger import setup_logger
 from src.rag import get_relevant_contexts
+from src.firebase_service import verify_auth_token, create_video_session, update_video_session
+from src.video_call_service import process_recording
+from src.prescription_service import add_prescription
+import uuid
+from typing import Dict
 
 class QuestionRequest(BaseModel):
     question: str
+
+class CreateSessionRequest(BaseModel):
+    patient_id: str
+    doctor_id: str
+    id_token: str  # Firebase ID token
+
+class AddPrescriptionRequest(BaseModel):
+    session_id: str
+    patient_id: str
+    doctor_id: str
+    medication: str
+    dosage: str
+    instructions: str
+    id_token: str
+
+class UploadRecordingRequest(BaseModel):
+    session_id: str
+    id_token: str
 
 logger = setup_logger("main")
 
@@ -17,6 +43,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CORS for frontend (Next.js at localhost:3000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "*"],
@@ -27,10 +54,12 @@ app.add_middleware(
 
 @app.get("/")
 def home():
+    """Root endpoint"""
     return {"message": "Welcome to SHIVAAI Chatbot API"}
 
 @app.post("/upload-report/")
 async def upload_report(file: UploadFile = File(...)):
+    """Upload and analyze medical report (PDF/image)"""
     try:
         file_content = await file.read()
         analysis = analyze_report(file_content)
@@ -41,6 +70,7 @@ async def upload_report(file: UploadFile = File(...)):
 
 @app.post("/ask-question/")
 async def ask_question(question: QuestionRequest):
+    """Answer medical question using chatbot"""
     try:
         response = chatbot.generate_response(question.question)
         return {"response": response}
@@ -50,6 +80,7 @@ async def ask_question(question: QuestionRequest):
 
 @app.post("/simplify-term/")
 async def simplify_term(term: str = Form(...)):
+    """Simplify medical term for general understanding"""
     try:
         simplified = simplify_terms(term)
         return {"term": term, "simplified": simplified}
@@ -57,8 +88,76 @@ async def simplify_term(term: str = Form(...)):
         logger.error(f"Error in simplify_term: {str(e)}")
         return {"error": str(e)}
 
+@app.post("/create-video-session/")
+async def create_video_session(request: CreateSessionRequest):
+    """Create video session metadata in Firestore"""
+    try:
+        decoded_token = verify_auth_token(request.id_token)
+        session_id = str(uuid.uuid4())
+        data = {
+            'date': firestore.SERVER_TIMESTAMP,
+            'participants': [
+                {'role': 'patient', 'uid': request.patient_id},
+                {'role': 'doctor', 'uid': request.doctor_id}
+            ],
+            'recording_url': None,
+            'metadata': {'duration': 0}  # Update later
+        }
+        create_video_session(session_id, data)
+        return {"session_id": session_id}
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        raise HTTPException(status_code=401, detail="Auth failed or error")
+
+@app.post("/add-prescription/")
+async def api_add_prescription(request: AddPrescriptionRequest):
+    """Add prescription during or after video call"""
+    try:
+        decoded_token = verify_auth_token(request.id_token)
+        if decoded_token['uid'] != request.doctor_id:
+            raise ValueError("Only doctor can add prescription")
+        prescription_id = add_prescription(
+            request.session_id, request.patient_id, request.doctor_id,
+            request.medication, request.dosage, request.instructions
+        )
+        return {"prescription_id": prescription_id}
+    except Exception as e:
+        logger.error(f"Error adding prescription: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/upload-recording/")
+async def upload_recording(file: UploadFile = File(...), session_id: str = Form(...), id_token: str = Form(...)):
+    """Upload 30s video recording, store in Firebase Storage, trigger AI processing"""
+    try:
+        decoded_token = verify_auth_token(id_token)
+        file_path = f"/tmp/{file.filename}"  # Temporary file
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+        destination = f"recordings/{session_id}/{file.filename}"
+        url = upload_to_storage(file_path, destination)
+        update_video_session(session_id, {'recording_url': url})
+        # Trigger AI processing (synchronous for prototype)
+        process_recording(url, session_id)
+        return {"status": "uploaded and processing"}
+    except Exception as e:
+        logger.error(f"Error uploading recording: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/ws/signaling/{session_id}")
+async def websocket_signaling(websocket: WebSocket, session_id: str):
+    """WebSocket for WebRTC signaling (offer/answer/ICE candidates)"""
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            # Echo for prototype; implement proper signaling logic in production
+            await websocket.send_json({"type": "signal", "data": data})
+    except WebSocketDisconnect:
+        logger.info("Signaling WebSocket disconnected")
+
 @app.websocket("/ws/disease_info")
 async def websocket_disease_info(websocket: WebSocket):
+    """WebSocket for real-time disease info queries"""
     await websocket.accept()
     try:
         while True:

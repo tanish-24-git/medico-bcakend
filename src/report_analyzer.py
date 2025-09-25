@@ -1,3 +1,6 @@
+# Handles medical report analysis from PDFs/images and AI post-processing
+# Updated: Integrated with AI report generation from call transcripts
+
 import pdfplumber
 import pytesseract
 from PIL import Image
@@ -6,23 +9,24 @@ import json
 from datetime import datetime
 from src.logger import setup_logger
 from src.chatbot_service import chatbot
-from src.rag import embed_text, upsert_to_pinecone
+from src.rag import embed_text, upsert_to_pinecone, store_ai_report
 
 logger = setup_logger("report_analyzer")
 
 def analyze_report(file_content):
+    """Analyze uploaded report (PDF/image)"""
     try:
-        # Extract text from the report
+        # Extract text from file
         text = extract_text_from_file(file_content)
         logger.info(f"Extracted text length: {len(text)} characters")
         
         if not text.strip():
             return "Unable to extract readable text from the report. Please ensure the file is a clear PDF or image."
         
-        # Comprehensive medical report analysis
+        # Generate comprehensive analysis
         analysis = perform_comprehensive_analysis(text)
         
-        # Store the analysis in Pinecone for future reference
+        # Store in Pinecone
         store_report_in_pinecone(text, analysis)
         
         return analysis
@@ -31,8 +35,8 @@ def analyze_report(file_content):
         logger.error(f"Error analyzing report: {e}")
         return f"Error analyzing report: {e}. Please consult a healthcare professional."
 
-def perform_comprehensive_analysis(text):
-    """Perform detailed medical report analysis using advanced prompts"""
+def perform_comprehensive_analysis(text, transcript: Optional[str] = None, prescription: Optional[Dict] = None):
+    """Perform detailed analysis of medical report or call transcript"""
     
     comprehensive_prompt = f"""
     You are a senior medical doctor and pathologist with 20+ years of experience. Analyze this medical report with extreme attention to detail. Provide a comprehensive analysis that covers everything a patient would want to know.
@@ -134,6 +138,11 @@ def perform_comprehensive_analysis(text):
     REMEMBER: Be thorough, compassionate, and provide hope where appropriate while being honest about concerns. Think like a caring doctor explaining to their own family member.
     """
     
+    if transcript:
+        comprehensive_prompt += f"\n\nIncorporate this call transcript: {transcript}"
+    if prescription:
+        comprehensive_prompt += f"\n\nInclude this prescription: {json.dumps(prescription)}"
+    
     try:
         response = chatbot.model.generate_content(comprehensive_prompt)
         logger.info("Successfully generated comprehensive report analysis")
@@ -143,9 +152,9 @@ def perform_comprehensive_analysis(text):
         return f"Error analyzing report: {e}"
 
 def store_report_in_pinecone(report_text, analysis):
-    """Store the report and analysis in Pinecone for future retrieval"""
+    """Store report and analysis in Pinecone for RAG retrieval"""
     try:
-        # Create embeddings for both report and analysis
+        # Create embeddings
         report_embedding = embed_text(report_text)
         analysis_embedding = embed_text(analysis)
         
@@ -183,11 +192,11 @@ def store_report_in_pinecone(report_text, analysis):
         logger.error(f"Error storing report in Pinecone: {e}")
 
 def extract_text_from_file(file_content):
-    """Extract text from PDF or image file with enhanced error handling"""
+    """Extract text from PDF or image file"""
     try:
         text = ""
         
-        # Try PDF extraction first
+        # Try PDF extraction
         try:
             with io.BytesIO(file_content) as pdf_file:
                 with pdfplumber.open(pdf_file) as pdf:
@@ -204,14 +213,10 @@ def extract_text_from_file(file_content):
         except Exception as pdf_error:
             logger.warning(f"PDF extraction failed: {pdf_error}")
         
-        # If PDF extraction failed, try OCR
+        # Try OCR if PDF fails
         try:
             image = Image.open(io.BytesIO(file_content))
-            
-            # Enhance image for better OCR
             image = image.convert('RGB')
-            
-            # Extract text using OCR
             text = pytesseract.image_to_string(image, config='--psm 6')
             logger.info(f"Successfully extracted text using OCR: {len(text)} characters")
             return text.strip()

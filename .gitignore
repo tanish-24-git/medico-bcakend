@@ -82,3 +82,4 @@ uploads/
 dist/
 coverage/
 frontend/
+medico-firebase-adminsdk.json
