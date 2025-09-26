@@ -1,5 +1,5 @@
 # Handles video call post-processing: audio extraction, STT, AI report generation
-# New file for processing call recordings
+# Updated: Use Cloudinary URLs for video download (public access)
 
 import whisper
 from pydub import AudioSegment
@@ -19,13 +19,13 @@ logger = setup_logger("video_call")
 model = whisper.load_model("tiny")
 
 def process_recording(video_url: str, session_id: str):
-    """Process video recording: extract audio, transcribe, generate AI report, store"""
+    """Post-process recording: Extract audio, transcribe, generate AI report, store."""
     try:
-        # Download video from Firebase Storage
+        # Download video from Cloudinary URL
         response = requests.get(video_url)
         video_content = io.BytesIO(response.content)
         
-        # Extract audio (assume MP4 input)
+        # Extract audio (assume MP4; export to WAV for Whisper)
         audio = AudioSegment.from_file(video_content, format="mp4")
         audio_path = f"/tmp/audio_{session_id}.wav"
         audio.export(audio_path, format="wav")
@@ -56,21 +56,18 @@ def process_recording(video_url: str, session_id: str):
         data = {
             'type': 'ai_generated',
             'date': firestore.SERVER_TIMESTAMP,
-            'content': {
-                'medications': prescription.get('medication') if prescription else '',
-                'observations': analysis
-            },
+            'content': {'medications': prescription.get('medication') if prescription else '', 'observations': analysis},
             'patient_ref': db.collection('patients').document(patient_ref),
             'doctor_ref': db.collection('doctors').document(doctor_ref),
             'session_ref': session_ref,
-            'file_url': None  # Update after storage
+            'file_url': None  # Update if JSON uploaded
         }
         create_report(report_id, data)
         
         # Store in Pinecone for RAG
         store_ai_report(report_id, analysis, {'source': 'ai_call_report'})
         
-        # Save report as JSON to Storage
+        # Optional: Save as JSON to Cloudinary
         json_path = f"/tmp/report_{report_id}.json"
         with open(json_path, 'w') as f:
             json.dump(data, f)

@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 from src.config import PINECONE_API_KEY, PINECONE_INDEX_NAME, PINECONE_DIMENSION
 from src.logger import setup_logger
-
+from typing import Dict
 
 # Load environment variables
 load_dotenv()

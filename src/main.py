@@ -1,5 +1,5 @@
 # FastAPI application: Main entry point
-# Updated: Added endpoints for video calls, prescriptions, recording uploads; WebSocket for signaling
+# Updated: New endpoints/WS for calls, prescriptions, AI
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +43,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS for frontend (Next.js at localhost:3000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "*"],
@@ -54,12 +53,10 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    """Root endpoint"""
     return {"message": "Welcome to SHIVAAI Chatbot API"}
 
 @app.post("/upload-report/")
 async def upload_report(file: UploadFile = File(...)):
-    """Upload and analyze medical report (PDF/image)"""
     try:
         file_content = await file.read()
         analysis = analyze_report(file_content)
@@ -70,7 +67,6 @@ async def upload_report(file: UploadFile = File(...)):
 
 @app.post("/ask-question/")
 async def ask_question(question: QuestionRequest):
-    """Answer medical question using chatbot"""
     try:
         response = chatbot.generate_response(question.question)
         return {"response": response}
@@ -80,7 +76,6 @@ async def ask_question(question: QuestionRequest):
 
 @app.post("/simplify-term/")
 async def simplify_term(term: str = Form(...)):
-    """Simplify medical term for general understanding"""
     try:
         simplified = simplify_terms(term)
         return {"term": term, "simplified": simplified}
@@ -90,16 +85,13 @@ async def simplify_term(term: str = Form(...)):
 
 @app.post("/create-video-session/")
 async def create_video_session(request: CreateSessionRequest):
-    """Create video session metadata in Firestore"""
+    """Create video session metadata in Firestore."""
     try:
         decoded_token = verify_auth_token(request.id_token)
         session_id = str(uuid.uuid4())
         data = {
             'date': firestore.SERVER_TIMESTAMP,
-            'participants': [
-                {'role': 'patient', 'uid': request.patient_id},
-                {'role': 'doctor', 'uid': request.doctor_id}
-            ],
+            'participants': [{'role': 'patient', 'uid': request.patient_id}, {'role': 'doctor', 'uid': request.doctor_id}],
             'recording_url': None,
             'metadata': {'duration': 0}  # Update later
         }
@@ -111,7 +103,7 @@ async def create_video_session(request: CreateSessionRequest):
 
 @app.post("/add-prescription/")
 async def api_add_prescription(request: AddPrescriptionRequest):
-    """Add prescription during or after video call"""
+    """Add prescription during/after call."""
     try:
         decoded_token = verify_auth_token(request.id_token)
         if decoded_token['uid'] != request.doctor_id:
@@ -127,16 +119,16 @@ async def api_add_prescription(request: AddPrescriptionRequest):
 
 @app.post("/upload-recording/")
 async def upload_recording(file: UploadFile = File(...), session_id: str = Form(...), id_token: str = Form(...)):
-    """Upload 30s video recording, store in Firebase Storage, trigger AI processing"""
+    """Upload 30s recording, store in Cloudinary, trigger AI processing."""
     try:
         decoded_token = verify_auth_token(id_token)
-        file_path = f"/tmp/{file.filename}"  # Temporary file
+        file_path = f"/tmp/{file.filename}"  # Temp save
         with open(file_path, "wb") as f:
             f.write(await file.read())
         destination = f"recordings/{session_id}/{file.filename}"
         url = upload_to_storage(file_path, destination)
         update_video_session(session_id, {'recording_url': url})
-        # Trigger AI processing (synchronous for prototype)
+        # Trigger AI processing synchronously for prototype
         process_recording(url, session_id)
         return {"status": "uploaded and processing"}
     except Exception as e:
@@ -145,19 +137,19 @@ async def upload_recording(file: UploadFile = File(...), session_id: str = Form(
 
 @app.websocket("/ws/signaling/{session_id}")
 async def websocket_signaling(websocket: WebSocket, session_id: str):
-    """WebSocket for WebRTC signaling (offer/answer/ICE candidates)"""
+    """WebSocket for WebRTC signaling (offer/answer/ICE)."""
     await websocket.accept()
     try:
         while True:
             data = await websocket.receive_json()
-            # Echo for prototype; implement proper signaling logic in production
+            # Broadcast to other participant (for simplicity, assume 2 participants; in prod, use rooms/channels)
+            # Here, just echo for prototype; implement proper signaling logic in frontend/backend.
             await websocket.send_json({"type": "signal", "data": data})
     except WebSocketDisconnect:
         logger.info("Signaling WebSocket disconnected")
 
 @app.websocket("/ws/disease_info")
 async def websocket_disease_info(websocket: WebSocket):
-    """WebSocket for real-time disease info queries"""
     await websocket.accept()
     try:
         while True:

@@ -10,6 +10,7 @@ from datetime import datetime
 from src.logger import setup_logger
 from src.chatbot_service import chatbot
 from src.rag import embed_text, upsert_to_pinecone, store_ai_report
+from typing import Optional, Dict, Any
 
 logger = setup_logger("report_analyzer")
 

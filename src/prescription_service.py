@@ -8,7 +8,7 @@ import uuid
 logger = setup_logger("prescription")
 
 def add_prescription(session_id: str, patient_id: str, doctor_id: str, medication: str, dosage: str, instructions: str) -> str:
-    """Create prescription and link to patient, doctor, session, and hospital"""
+    """Create and link prescription."""
     prescription_id = str(uuid.uuid4())
     patient_ref = db.collection('patients').document(patient_id)
     doctor_ref = db.collection('doctors').document(doctor_id)
@@ -21,6 +21,6 @@ def add_prescription(session_id: str, patient_id: str, doctor_id: str, medicatio
         'doctor_ref': doctor_ref,
         'patient_ref': patient_ref,
         'session_ref': session_ref,
-        'hospital_id': '1234'  # Prototype fixed ID
+        'hospital_id': '1234'  # Prototype
     }
     return create_prescription(prescription_id, data)
