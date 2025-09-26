@@ -14,7 +14,7 @@ logger = setup_logger("chatbot")
 
 class MedicalChatbot:
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
     def analyze_prompt(self, user_input: str) -> Dict[str, Any]:
         """Analyze user prompt to determine intent and required actions"""
