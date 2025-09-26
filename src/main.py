@@ -1,5 +1,5 @@
 # FastAPI application: Main entry point
-# Updated: New endpoints/WS for calls, prescriptions, AI
+# Updated: Added /doctors endpoint for frontend booking
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,11 +8,11 @@ from src.chatbot_service import get_disease_info, simplify_terms, chatbot
 from src.report_analyzer import analyze_report
 from src.logger import setup_logger
 from src.rag import get_relevant_contexts
-from src.firebase_service import verify_auth_token, create_video_session, update_video_session
+from src.firebase_service import verify_auth_token, create_video_session, update_video_session, db
 from src.video_call_service import process_recording
 from src.prescription_service import add_prescription
 import uuid
-from typing import Dict
+from typing import Dict, List
 
 class QuestionRequest(BaseModel):
     question: str
@@ -29,10 +29,6 @@ class AddPrescriptionRequest(BaseModel):
     medication: str
     dosage: str
     instructions: str
-    id_token: str
-
-class UploadRecordingRequest(BaseModel):
-    session_id: str
     id_token: str
 
 logger = setup_logger("main")
@@ -128,11 +124,23 @@ async def upload_recording(file: UploadFile = File(...), session_id: str = Form(
         destination = f"recordings/{session_id}/{file.filename}"
         url = upload_to_storage(file_path, destination)
         update_video_session(session_id, {'recording_url': url})
-        # Trigger AI processing synchronously for prototype
+        # Trigger AI processing asynchronously (for prototype, sync)
         process_recording(url, session_id)
         return {"status": "uploaded and processing"}
     except Exception as e:
         logger.error(f"Error uploading recording: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/doctors", response_model=List[Dict])
+async def get_doctors():
+    """Fetch list of doctors for patient booking feature."""
+    try:
+        doctors = db.collection('doctors').get()
+        doctor_list = [{"uid": doc.id, **doc.to_dict()} for doc in doctors]
+        logger.info(f"Fetched {len(doctor_list)} doctors")
+        return doctor_list
+    except Exception as e:
+        logger.error(f"Error fetching doctors: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/signaling/{session_id}")
